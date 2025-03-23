@@ -191,30 +191,60 @@ async function run() {
         date: '2024-02-15',
       },
     ];
-    app.get('/employee-list', verifyToken, verifyAdmin, async (req, res) => {
+    app.get('/employee-list', verifyToken, async (req, res) => {
       try {
-        const employees = await usersCollection.find().toArray();
+        const employees = await usersCollection
+          .find({}, { projection: { password: 0 } }) // Exclude sensitive fields
+          .toArray();
         res.send(employees);
       } catch (error) {
         res.status(500).send({ message: 'Failed to fetch employees', error });
       }
     });
 
-    app.get('/hr/employee-details/:email', verifyToken, async (req, res) => {
+    app.patch('/hr/verify-employee/:id', verifyToken, async (req, res) => {
       try {
-        const email = req.params.email;
+        const id = req.params.id;
 
+        // Validate ID
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: 'Invalid employee ID' });
+        }
+
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: { isVerified: true },
+        };
+
+        const result = await usersCollection.updateOne(filter, updateDoc);
+
+        if (result.modifiedCount > 0) {
+          res.send({ message: 'Employee verified successfully', result });
+        } else {
+          res
+            .status(404)
+            .send({ message: 'Employee not found or already verified' });
+        }
+      } catch (error) {
+        res.status(500).send({ message: 'Failed to verify employee', error });
+      }
+    });
+
+    app.get('/employee-details/:id', verifyToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const filter = { _id: new ObjectId(id) };
         // Find employee details
-        const employee = await usersCollection.findOne({ email });
+        const employee = await usersCollection.findOne(filter);
 
         if (!employee) {
           return res.status(404).send({ message: 'Employee not found' });
         }
 
         // Fetch employee's salary history from payments collection
-        const payments = await paymentsCollection.find({ email }).toArray();
+        // const payments = await paymentsCollection.find({ email }).toArray();
 
-        res.send({ employee, payments });
+        res.send(employee);
       } catch (error) {
         console.error('Error fetching employee details:', error);
         res.status(500).send({ message: 'Internal server error' });
@@ -223,59 +253,91 @@ async function run() {
 
     // Progress Page - Work Records API
 
+    const { ObjectId } = require('mongodb');
+
     // ✅ GET all work records (Filter by name & month)
-    app.get('/progress', verifyToken, (req, res) => {
-      const { name, month } = req.query;
-      let filteredRecords = workRecords;
+    app.get('/progress', verifyToken, async (req, res) => {
+      try {
+        const { name, month } = req.query;
 
-      if (name) {
-        filteredRecords = filteredRecords.filter(
-          record => record.name.toLowerCase() === name.toLowerCase()
-        );
+        let query = {};
+        if (name) {
+          query.name = { $regex: new RegExp(`^${name}$`, 'i') }; // Case-insensitive search
+        }
+        if (month) {
+          query.date = {
+            $gte: new Date(`${month}-01T00:00:00.000Z`),
+            $lt: new Date(`${month}-31T23:59:59.999Z`),
+          };
+        }
+
+        const records = await tasksCollection.find(query).toArray();
+        res.json(records);
+      } catch (error) {
+        console.error('Error fetching progress data:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
       }
-
-      if (month) {
-        filteredRecords = filteredRecords.filter(record =>
-          record.date.startsWith(month)
-        );
-      }
-
-      res.json(filteredRecords);
     });
 
     // ✅ POST a new work record
-    app.post('/progress', verifyToken, (req, res) => {
-      const { name, email, task, date } = req.body;
-      if (!name || !email || !task || !date) {
-        return res.status(400).json({ error: 'All fields are required' });
-      }
+    // app.post('/progress', verifyToken, async (req, res) => {
+    //   try {
+    //     const { name, email, task, date } = req.body;
+    //     if (!name || !email || !task || !date) {
+    //       return res.status(400).json({ error: 'All fields are required' });
+    //     }
 
-      const newRecord = { id: workRecords.length + 1, name, email, task, date };
-      workRecords.push(newRecord);
-      res
-        .status(201)
-        .json({ message: 'Work record added successfully', newRecord });
-    });
+    //     const newRecord = { name, email, task, date: new Date(date) };
+    //     const result = await workRecordsCollection.insertOne(newRecord);
+    //     res
+    //       .status(201)
+    //       .json({ message: 'Work record added successfully', newRecord });
+    //   } catch (error) {
+    //     console.error('Error adding work record:', error);
+    //     res.status(500).json({ error: 'Internal Server Error' });
+    //   }
+    // });
 
     // ✅ UPDATE a work record
-    app.put('/progress/:id', verifyToken, (req, res) => {
-      const { id } = req.params;
-      const { task } = req.body;
+    app.put('/progress/:id', verifyToken, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { task } = req.body;
 
-      const record = workRecords.find(record => record.id === parseInt(id));
-      if (!record)
-        return res.status(404).json({ error: 'Work record not found' });
+        const result = await tasksCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { task } }
+        );
 
-      record.task = task;
-      res.json({ message: 'Work record updated', record });
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Work record not found' });
+        }
+
+        res.json({ message: 'Work record updated' });
+      } catch (error) {
+        console.error('Error updating work record:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+      }
     });
 
     // ✅ DELETE a work record
-    app.delete('/progress/:id', verifyToken, (req, res) => {
-      const { id } = req.params;
-      workRecords = workRecords.filter(record => record.id !== parseInt(id));
+    app.delete('/progress/:id', verifyToken, async (req, res) => {
+      try {
+        const { id } = req.params;
 
-      res.json({ message: 'Work record deleted' });
+        const result = await tasksCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).json({ error: 'Work record not found' });
+        }
+
+        res.json({ message: 'Work record deleted' });
+      } catch (error) {
+        console.error('Error deleting work record:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+      }
     });
   } finally {
     // Ensures that the client will close when you finish/error
