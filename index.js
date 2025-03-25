@@ -36,6 +36,7 @@ async function run() {
     const paymentsCollection = db.collection('payments');
     const tasksCollection = db.collection('tasks');
     const messagesCollection = db.collection('messages');
+    const payrollCollection = db.collection('payroll');
 
     // jwt related apis
     app.post('/jwt', async (req, res) => {
@@ -126,11 +127,56 @@ async function run() {
       }
     );
 
+    // 1. API route to get all payroll records (pending payments)
     app.get('/payroll', verifyToken, verifyAdmin, async (req, res) => {
-      console.log(req.headers);
-      const result = await paymentsCollection.find().toArray();
-      res.send(result);
+      try {
+        // Fetch payroll data that hasn't been paid yet
+        const payrolls = await payrollCollection
+          .find({ status: 'Pending' })
+          .toArray();
+
+        if (payrolls.length > 0) {
+          res.status(200).json(payrolls);
+        } else {
+          res.status(404).send({ message: 'No pending payrolls found' });
+        }
+      } catch (error) {
+        res.status(500).send({ message: 'Failed to fetch payrolls', error });
+      }
     });
+
+    // 2. API route to update payroll status to "Paid" and add payment date
+    app.patch('/payroll/:id', verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const paymentDate = new Date(); // Set current date as payment date
+
+        // Update the payroll status to 'Paid' and add payment date
+        const updateDoc = {
+          $set: {
+            status: 'Paid',
+            paymentDate: paymentDate, // Set payment date to current date
+          },
+        };
+
+        const filter = { _id: new ObjectId(id) };
+
+        // Update the payroll entry in the database
+        const result = await payrollCollection.updateOne(filter, updateDoc);
+
+        if (result.modifiedCount > 0) {
+          res.send({ message: 'Payment processed successfully' });
+        } else {
+          res
+            .status(404)
+            .send({ message: 'Payroll not found or already paid' });
+        }
+      } catch (error) {
+        res.status(500).send({ message: 'Failed to process payment', error });
+      }
+    });
+    // Employee related apis
+
     app.post('/work-sheet', async (req, res) => {
       const tasks = req.body;
       const result = await tasksCollection.insertOne(tasks);
@@ -150,18 +196,68 @@ async function run() {
       console.log(result);
     });
 
-    // Get payment history for logged-in employee
-    app.get('/payment-history', verifyToken, async (req, res) => {
+    // app.patch('/work-sheet/:id', async (req, res) => {
+    //   const id = req.params.id;
+    //   const updatedTask = req.body;
+    //   const filter = { _id: new ObjectId(id) };
+    //   const updateDoc = { $set: updatedTask };
+    //   const result = await tasksCollection.updateOne(filter, updateDoc);
+    //   res.send(result);
+    // });
+
+    app.put('/work-sheet/:id', async (req, res) => {
+      const id = req.params.id;
+      const updatedData = req.body;
+
+      // Ensure `_id` is not included in the update operation
+      delete updatedData._id;
+
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: updatedData, // Only update provided fields
+      };
+
       try {
-        const email = req.decoded.email; // JWT থেকে ইমেইল নেওয়া
-        const query = { email: email };
-        const result = await paymentsCollection
-          .find(query)
-          .sort({ year: 1, month: 1 })
-          .toArray();
+        const result = await tasksCollection.updateOne(filter, updateDoc);
         res.send(result);
       } catch (error) {
-        res.status(500).send({ message: 'Failed to fetch payment history' });
+        console.error('Error updating document:', error);
+        res.status(500).send({ message: 'Update failed', error });
+      }
+    });
+    // Get Employee Details by Slug (email or uid)
+    app.get('/employee-details/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const employee = await usersCollection.findOne(query);
+
+        if (!employee) {
+          return res.status(404).json({ message: 'Employee not found' });
+        }
+
+        res.json(employee); // ✅ Correctly send the response once
+      } catch (error) {
+        res.status(500).json({ message: 'Server error', error });
+      }
+    });
+
+    // Get Employee Salary History
+    app.get('/employee-salary/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const salaryHistory = await payrollCollection
+          .find({ employeeEmail: id })
+          .sort({ year: 1, month: 1 }) // Sort by Year & Month
+          .select('month year amount -_id'); // Return only required fields
+
+        if (!salaryHistory.length) {
+          return res.status(404).json({ message: 'No salary history found' });
+        }
+
+        res.json(salaryHistory);
+      } catch (error) {
+        res.status(500).json({ message: 'Server error', error });
       }
     });
 
@@ -230,30 +326,29 @@ async function run() {
       }
     });
 
-    app.get('/employee-details/:id', verifyToken, async (req, res) => {
+    // Endpoint to handle payment requests
+    app.post('/payroll', async (req, res) => {
       try {
-        const id = req.params.id;
-        const filter = { _id: new ObjectId(id) };
-        // Find employee details
-        const employee = await usersCollection.findOne(filter);
+        const { employeeId, name, email, salary, month, year } = req.body;
 
-        if (!employee) {
-          return res.status(404).send({ message: 'Employee not found' });
-        }
+        const newPayment = {
+          employeeId,
+          name,
+          email,
+          salary,
+          month,
+          year,
+          status: 'Pending', // Default status before admin approval
+          createdAt: new Date(),
+        };
 
-        // Fetch employee's salary history from payments collection
-        // const payments = await paymentsCollection.find({ email }).toArray();
-
-        res.send(employee);
+        const result = await payrollCollection.insertOne(newPayment);
+        res.status(201).json({ insertedId: result.insertedId });
       } catch (error) {
-        console.error('Error fetching employee details:', error);
-        res.status(500).send({ message: 'Internal server error' });
+        console.error(error);
+        res.status(500).json({ error: 'Failed to process payment' });
       }
     });
-
-    // Progress Page - Work Records API
-
-    const { ObjectId } = require('mongodb');
 
     // ✅ GET all work records (Filter by name & month)
     app.get('/progress', verifyToken, async (req, res) => {
