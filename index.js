@@ -196,15 +196,6 @@ async function run() {
       console.log(result);
     });
 
-    // app.patch('/work-sheet/:id', async (req, res) => {
-    //   const id = req.params.id;
-    //   const updatedTask = req.body;
-    //   const filter = { _id: new ObjectId(id) };
-    //   const updateDoc = { $set: updatedTask };
-    //   const result = await tasksCollection.updateOne(filter, updateDoc);
-    //   res.send(result);
-    // });
-
     app.put('/work-sheet/:id', async (req, res) => {
       const id = req.params.id;
       const updatedData = req.body;
@@ -225,39 +216,102 @@ async function run() {
         res.status(500).send({ message: 'Update failed', error });
       }
     });
-    // Get Employee Details by Slug (email or uid)
-    app.get('/employee-details/:id', async (req, res) => {
-      try {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
-        const employee = await usersCollection.findOne(query);
+    // // Get Employee Details by Slug (email or uid)
+    // app.get('/employee-details/:id', async (req, res) => {
+    //   try {
+    //     const id = req.params.id;
+    //     const query = { _id: new ObjectId(id) };
+    //     const employee = await usersCollection.findOne(query);
 
-        if (!employee) {
-          return res.status(404).json({ message: 'Employee not found' });
+    //     if (!employee) {
+    //       return res.status(404).json({ message: 'Employee not found' });
+    //     }
+
+    //     res.json(employee); // ✅ Correctly send the response once
+    //   } catch (error) {
+    //     res.status(500).json({ message: 'Server error', error });
+    //   }
+    // });
+
+    // ✅ Improved API: Fetch Employee Payment History
+    app.get('/payment-history', verifyToken, async (req, res) => {
+      try {
+        const employeeId = req.user.id; // Get logged-in employee ID from JWT
+
+        // Validate and parse query parameters
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 5;
+        const year = req.query.year ? parseInt(req.query.year) : null;
+        const search = req.query.search || '';
+
+        // Build the base query
+        const query = {
+          employeeId: new ObjectId(employeeId),
+          status: 'Paid', // Only show completed payments
+        };
+
+        // Apply filters if provided
+        if (year) {
+          query.year = year;
         }
 
-        res.json(employee); // ✅ Correctly send the response once
-      } catch (error) {
-        res.status(500).json({ message: 'Server error', error });
-      }
-    });
-
-    // Get Employee Salary History
-    app.get('/employee-salary/:id', async (req, res) => {
-      try {
-        const { id } = req.params;
-        const salaryHistory = await payrollCollection
-          .find({ employeeEmail: id })
-          .sort({ year: 1, month: 1 }) // Sort by Year & Month
-          .select('month year amount -_id'); // Return only required fields
-
-        if (!salaryHistory.length) {
-          return res.status(404).json({ message: 'No salary history found' });
+        if (search) {
+          query.transactionId = {
+            $regex: search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+            $options: 'i',
+          };
         }
 
-        res.json(salaryHistory);
+        // Get total count for pagination
+        const totalPayments = await payrollCollection.countDocuments(query);
+
+        // Calculate total pages
+        const totalPages = Math.ceil(totalPayments / limit);
+
+        // Fetch paginated payment history with proper sorting
+        const payments = await payrollCollection
+          .find(query)
+          .sort({ year: 1, month: 1, paymentDate: -1 }) // Sort by year, month (ascending), then payment date (newest first)
+          .skip((page - 1) * limit)
+          .limit(limit)
+          .project({
+            _id: 1,
+            month: 1,
+            year: 1,
+            salary: 1,
+            transactionId: 1,
+            paymentDate: 1,
+          })
+          .toArray();
+
+        // Format the response data
+        const responseData = payments.map(payment => ({
+          id: payment._id,
+          month: payment.month,
+          year: payment.year,
+          amount: payment.salary,
+          transactionId: payment.transactionId,
+          paymentDate: payment.paymentDate,
+        }));
+
+        res.status(200).json({
+          success: true,
+          data: responseData,
+          pagination: {
+            currentPage: page,
+            totalPages,
+            totalPayments,
+            hasNextPage: page < totalPages,
+            hasPreviousPage: page > 1,
+          },
+        });
       } catch (error) {
-        res.status(500).json({ message: 'Server error', error });
+        console.error('Error in /payment-history:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch payment history',
+          error: process.env.NODE_ENV === 'development' ? error.message : null,
+        });
       }
     });
 
@@ -350,6 +404,47 @@ async function run() {
       }
     });
 
+    // Get Employee Salary History
+    app.get('/employee-salary/:id', verifyToken, async (req, res) => {
+      try {
+        const employeeId = req.params.id;
+
+        // Validate ID format
+        if (!ObjectId.isValid(employeeId)) {
+          return res
+            .status(400)
+            .json({ message: 'Invalid employee ID format' });
+        }
+
+        const query = {
+          employeeId: new ObjectId(employeeId),
+          status: 'Paid', // Only show completed payments
+        };
+
+        // Fetch salary history sorted by year and month
+        const salaryHistory = await payrollCollection
+          .find(query)
+          .sort({ year: 1, month: 1 }) // Sort chronologically
+          .project({
+            month: 1,
+            year: 1,
+            salary: 1,
+            paymentDate: 1,
+            transactionId: 1,
+            _id: 0,
+          })
+          .toArray();
+
+        res.status(200).json(salaryHistory);
+      } catch (error) {
+        console.error('Error fetching salary history:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch salary history',
+          error: process.env.NODE_ENV === 'development' ? error.message : null,
+        });
+      }
+    });
     // ✅ GET all work records (Filter by name & month)
     app.get('/progress', verifyToken, async (req, res) => {
       try {
