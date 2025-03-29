@@ -35,7 +35,6 @@ async function run() {
     const usersCollection = db.collection('users');
     const paymentsCollection = db.collection('payments');
     const tasksCollection = db.collection('tasks');
-    const messagesCollection = db.collection('messages');
     const payrollCollection = db.collection('payroll');
 
     // jwt related apis
@@ -48,18 +47,69 @@ async function run() {
     });
     // users related apis
     app.post('/users', async (req, res) => {
-      const user = req.body;
-      // insert email if user doesnt exists:
-      // you can do this many ways (1.email unique, 2.upsert 3. simple checking)
-      const query = { email: user.email };
-      const existingUser = await usersCollection.findOne(query);
-      if (existingUser) {
-        return res.send({ message: 'user already exists', insertedId: null });
+      try {
+        const user = req.body;
+
+        // Validate required fields (remove password)
+        const requiredFields = [
+          'name',
+          'email',
+          'role',
+          'bankAccountNo',
+          'designation',
+          'salary',
+          'image',
+        ];
+        const missingFields = requiredFields.filter(field => !user[field]);
+
+        if (missingFields.length > 0) {
+          return res.status(400).json({
+            success: false,
+            message: `Missing required fields: ${missingFields.join(', ')}`,
+            missingFields,
+          });
+        }
+
+        // Validate image URL format if provided
+        if (user.image && !isValidUrl(user.image)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid image URL format',
+          });
+        }
+
+        // Rest of your existing validation...
+
+        // Create user document (remove password)
+        const userDoc = {
+          name: user.name,
+          email: user.email,
+          image: user.image,
+          role: user.role,
+          bankAccountNo: user.bankAccountNo,
+          designation: user.designation,
+          salary: parseFloat(user.salary),
+          isVerified: false,
+          isFired: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+
+        // ... rest of your code
+      } catch (error) {
+        // ... error handling
       }
-      const result = await usersCollection.insertOne(user);
-      res.send(result);
     });
 
+    // Helper function for URL validation
+    function isValidUrl(string) {
+      try {
+        new URL(string);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
     // verify token middlewares
     const verifyToken = (req, res, next) => {
       // console.log('inside verify token', req.headers.authorization);
@@ -86,18 +136,40 @@ async function run() {
       }
       next();
     };
+    // Get user role endpoint
+    app.get('/user/role/:email', verifyToken, async (req, res) => {
+      const email = req.params.email;
+
+      if (email !== req.decoded.email) {
+        return res.status(403).send({ message: 'Forbidden access' });
+      }
+
+      const user = await usersCollection.findOne(
+        { email },
+        { projection: { role: 1 } }
+      );
+
+      if (!user) {
+        return res.status(404).send({ message: 'User not found' });
+      }
+
+      res.send({ role: user.role });
+    });
+
+    // Check if user is admin (for specific admin-only operations)
     app.get('/user/admin/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
+
       if (email !== req.decoded.email) {
-        return res.status(403).send({ message: 'forbidden access' });
+        return res.status(403).send({ message: 'Forbidden access' });
       }
-      const query = { email: email };
-      const user = await usersCollection.findOne(query);
-      let admin = false;
-      if (user) {
-        admin = user?.role === 'admin';
-      }
-      res.send({ admin });
+
+      const user = await usersCollection.findOne(
+        { email },
+        { projection: { role: 1 } }
+      );
+
+      res.send({ admin: user?.role === 'Admin' });
     });
     // Admin only apis
     app.get(
@@ -126,50 +198,174 @@ async function run() {
         res.send(result);
       }
     );
+    // Add these to your existing backend routes
 
-    // 1. API route to get all payroll records (pending payments)
+    // Fire an employee
+    app.patch(
+      '/employee/fire/:id',
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: {
+            isFired: true,
+          },
+        };
+        const result = await usersCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      }
+    );
+
+    // Adjust salary (only allows increasing)
+    app.patch(
+      '/employee/salary/:id',
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        const { salary } = req.body;
+
+        const employee = await usersCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (salary <= employee.salary) {
+          return res
+            .status(400)
+            .send({ error: 'New salary must be higher than current salary' });
+        }
+
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: {
+            salary: salary,
+          },
+        };
+        const result = await usersCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      }
+    );
+    // Enhanced backend routes for payroll
+
+    // 1. Get payroll records with additional filtering
     app.get('/payroll', verifyToken, verifyAdmin, async (req, res) => {
       try {
-        // Fetch payroll data that hasn't been paid yet
+        // Optional query parameters for filtering
+        const { status, month, year } = req.query;
+
+        const filter = {};
+        if (status) filter.status = status;
+        if (month) filter.month = month;
+        if (year) filter.year = parseInt(year);
+
+        // Fetch payroll data with employee details
         const payrolls = await payrollCollection
-          .find({ status: 'Pending' })
+          .aggregate([
+            { $match: filter },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'employeeId',
+                foreignField: '_id',
+                as: 'employee',
+              },
+            },
+            { $unwind: '$employee' },
+            {
+              $project: {
+                _id: 1,
+                name: '$employee.name',
+                designation: '$employee.designation',
+                photo: '$employee.photo',
+                salary: 1,
+                month: 1,
+                year: 1,
+                status: 1,
+                paymentDate: 1,
+                createdAt: 1,
+              },
+            },
+            { $sort: { createdAt: -1 } },
+          ])
           .toArray();
 
-        if (payrolls.length > 0) {
-          res.status(200).json(payrolls);
-        } else {
-          res.status(404).send({ message: 'No pending payrolls found' });
-        }
+        res.status(200).json(payrolls);
       } catch (error) {
         res.status(500).send({ message: 'Failed to fetch payrolls', error });
       }
     });
 
-    // 2. API route to update payroll status to "Paid" and add payment date
+    // 2. Process payment with additional validation
     app.patch('/payroll/:id', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
-        const paymentDate = new Date(); // Set current date as payment date
+        const paymentDate = new Date();
 
-        // Update the payroll status to 'Paid' and add payment date
+        // Check if payment already exists for this period
+        const payroll = await payrollCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!payroll) {
+          return res.status(404).send({ message: 'Payroll record not found' });
+        }
+
+        if (payroll.status === 'Paid') {
+          return res
+            .status(400)
+            .send({ message: 'This payment has already been processed' });
+        }
+
+        // Check for duplicate payments for same employee in same period
+        const duplicatePayment = await payrollCollection.findOne({
+          employeeId: payroll.employeeId,
+          month: payroll.month,
+          year: payroll.year,
+          status: 'Paid',
+          _id: { $ne: new ObjectId(id) },
+        });
+
+        if (duplicatePayment) {
+          return res.status(400).send({
+            message: 'This employee has already been paid for this period',
+          });
+        }
+
+        // Update the payroll status
         const updateDoc = {
           $set: {
             status: 'Paid',
-            paymentDate: paymentDate, // Set payment date to current date
+            paymentDate: paymentDate,
+            processedBy: req.user.email,
           },
         };
 
-        const filter = { _id: new ObjectId(id) };
-
-        // Update the payroll entry in the database
-        const result = await payrollCollection.updateOne(filter, updateDoc);
+        const result = await payrollCollection.updateOne(
+          { _id: new ObjectId(id) },
+          updateDoc
+        );
 
         if (result.modifiedCount > 0) {
-          res.send({ message: 'Payment processed successfully' });
+          // Create a payment record in the database
+          await paymentsCollection.insertOne({
+            employeeId: payroll.employeeId,
+            payrollId: new ObjectId(id),
+            amount: payroll.salary,
+            month: payroll.month,
+            year: payroll.year,
+            paymentDate: paymentDate,
+            processedBy: req.user.email,
+            createdAt: new Date(),
+          });
+
+          res.send({
+            message: 'Payment processed successfully',
+            paymentDate: paymentDate.toISOString(),
+          });
         } else {
-          res
-            .status(404)
-            .send({ message: 'Payroll not found or already paid' });
+          res.status(400).send({ message: 'Failed to process payment' });
         }
       } catch (error) {
         res.status(500).send({ message: 'Failed to process payment', error });
@@ -216,22 +412,6 @@ async function run() {
         res.status(500).send({ message: 'Update failed', error });
       }
     });
-    // // Get Employee Details by Slug (email or uid)
-    // app.get('/employee-details/:id', async (req, res) => {
-    //   try {
-    //     const id = req.params.id;
-    //     const query = { _id: new ObjectId(id) };
-    //     const employee = await usersCollection.findOne(query);
-
-    //     if (!employee) {
-    //       return res.status(404).json({ message: 'Employee not found' });
-    //     }
-
-    //     res.json(employee); // ✅ Correctly send the response once
-    //   } catch (error) {
-    //     res.status(500).json({ message: 'Server error', error });
-    //   }
-    // });
 
     // ✅ Improved API: Fetch Employee Payment History
     app.get('/payment-history', verifyToken, async (req, res) => {
@@ -404,44 +584,141 @@ async function run() {
       }
     });
 
+    // // Get Employee Salary History
+    // app.get('/employee-salary/:id', verifyToken, async (req, res) => {
+    //   try {
+    //     const employeeId = req.params.id;
+
+    //     // Validate ID format
+    //     if (!ObjectId.isValid(employeeId)) {
+    //       return res
+    //         .status(400)
+    //         .json({ message: 'Invalid employee ID format' });
+    //     }
+
+    //     const query = {
+    //       employeeId: new ObjectId(employeeId),
+    //       status: 'Paid', // Only show completed payments
+    //     };
+
+    //     // Fetch salary history sorted by year and month
+    //     const salaryHistory = await payrollCollection
+    //       .find(query)
+    //       .sort({ year: 1, month: 1 }) // Sort chronologically
+    //       .project({
+    //         month: 1,
+    //         year: 1,
+    //         salary: 1,
+    //         paymentDate: 1,
+    //         transactionId: 1,
+    //         _id: 0,
+    //       })
+    //       .toArray();
+
+    //     res.status(200).json(salaryHistory);
+    //   } catch (error) {
+    //     console.error('Error fetching salary history:', error);
+    //     res.status(500).json({
+    //       success: false,
+    //       message: 'Failed to fetch salary history',
+    //       error: process.env.NODE_ENV === 'development' ? error.message : null,
+    //     });
+    //   }
+    // });
+    // Get Employee Details
+    app.get('/employee-details/:id', verifyToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        // Handle both ObjectId and email
+        let query;
+        if (ObjectId.isValid(id)) {
+          query = { _id: new ObjectId(id) };
+        } else {
+          query = { email: id };
+        }
+
+        const employee = await usersCollection.findOne(query, {
+          projection: {
+            password: 0, // Exclude sensitive fields
+          },
+        });
+
+        if (!employee) {
+          return res.status(404).json({
+            success: false,
+            message: 'Employee not found',
+          });
+        }
+
+        res.json({
+          success: true,
+          data: {
+            ...employee,
+            // Ensure all required fields exist
+            designation: employee.designation || 'Not specified',
+            salary: employee.salary || 0,
+            bankAccountNo: employee.bankAccountNo || 'Not provided',
+            isVerified: employee.isVerified || false,
+          },
+        });
+      } catch (error) {
+        console.error('Error fetching employee details:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch employee details',
+        });
+      }
+    });
+
     // Get Employee Salary History
     app.get('/employee-salary/:id', verifyToken, async (req, res) => {
       try {
-        const employeeId = req.params.id;
+        const id = req.params.id;
 
-        // Validate ID format
-        if (!ObjectId.isValid(employeeId)) {
-          return res
-            .status(400)
-            .json({ message: 'Invalid employee ID format' });
+        // Find employee first to get their ID if email was used
+        let employee;
+        if (ObjectId.isValid(id)) {
+          employee = await usersCollection.findOne({ _id: new ObjectId(id) });
+        } else {
+          employee = await usersCollection.findOne({ email: id });
         }
 
-        const query = {
-          employeeId: new ObjectId(employeeId),
-          status: 'Paid', // Only show completed payments
-        };
+        if (!employee) {
+          return res.status(404).json({
+            success: false,
+            message: 'Employee not found',
+          });
+        }
 
-        // Fetch salary history sorted by year and month
+        // Get salary history from payroll collection
         const salaryHistory = await payrollCollection
-          .find(query)
+          .find({
+            employeeId: employee._id,
+            status: 'Paid',
+          })
           .sort({ year: 1, month: 1 }) // Sort chronologically
           .project({
             month: 1,
             year: 1,
             salary: 1,
             paymentDate: 1,
-            transactionId: 1,
             _id: 0,
           })
           .toArray();
 
-        res.status(200).json(salaryHistory);
+        res.json({
+          success: true,
+          data: salaryHistory.map(item => ({
+            ...item,
+            salary: Number(item.salary), // Ensure numeric value
+          })),
+        });
       } catch (error) {
         console.error('Error fetching salary history:', error);
         res.status(500).json({
           success: false,
           message: 'Failed to fetch salary history',
-          error: process.env.NODE_ENV === 'development' ? error.message : null,
         });
       }
     });
@@ -468,25 +745,6 @@ async function run() {
         res.status(500).json({ error: 'Internal Server Error' });
       }
     });
-
-    // ✅ POST a new work record
-    // app.post('/progress', verifyToken, async (req, res) => {
-    //   try {
-    //     const { name, email, task, date } = req.body;
-    //     if (!name || !email || !task || !date) {
-    //       return res.status(400).json({ error: 'All fields are required' });
-    //     }
-
-    //     const newRecord = { name, email, task, date: new Date(date) };
-    //     const result = await workRecordsCollection.insertOne(newRecord);
-    //     res
-    //       .status(201)
-    //       .json({ message: 'Work record added successfully', newRecord });
-    //   } catch (error) {
-    //     console.error('Error adding work record:', error);
-    //     res.status(500).json({ error: 'Internal Server Error' });
-    //   }
-    // });
 
     // ✅ UPDATE a work record
     app.put('/progress/:id', verifyToken, async (req, res) => {
