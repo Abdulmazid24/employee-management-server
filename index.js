@@ -45,12 +45,66 @@ async function run() {
       });
       res.send({ token });
     });
-    // users related apis
+    // // users related apis
+    // app.post('/users', async (req, res) => {
+    //   try {
+    //     const user = req.body;
+
+    //     // Validate required fields (remove password)
+    //     const requiredFields = [
+    //       'name',
+    //       'email',
+    //       'role',
+    //       'bankAccountNo',
+    //       'designation',
+    //       'salary',
+    //       'image',
+    //     ];
+    //     const missingFields = requiredFields.filter(field => !user[field]);
+
+    //     if (missingFields.length > 0) {
+    //       return res.status(400).json({
+    //         success: false,
+    //         message: `Missing required fields: ${missingFields.join(', ')}`,
+    //         missingFields,
+    //       });
+    //     }
+
+    //     // Validate image URL format if provided
+    //     if (user.image && !isValidUrl(user.image)) {
+    //       return res.status(400).json({
+    //         success: false,
+    //         message: 'Invalid image URL format',
+    //       });
+    //     }
+
+    //     // Rest of your existing validation...
+
+    //     // Create user document (remove password)
+    //     const userDoc = {
+    //       name: user.name,
+    //       email: user.email,
+    //       image: user.image,
+    //       role: user.role,
+    //       bankAccountNo: user.bankAccountNo,
+    //       designation: user.designation,
+    //       salary: parseFloat(user.salary),
+    //       isVerified: false,
+    //       isFired: false,
+    //       createdAt: new Date(),
+    //       updatedAt: new Date(),
+    //     };
+
+    //     // ... rest of your code
+    //   } catch (error) {
+    //     // ... error handling
+    //   }
+    // });
     app.post('/users', async (req, res) => {
       try {
         const user = req.body;
 
-        // Validate required fields (remove password)
+        // Validate required fields
         const requiredFields = [
           'name',
           'email',
@@ -66,41 +120,43 @@ async function run() {
           return res.status(400).json({
             success: false,
             message: `Missing required fields: ${missingFields.join(', ')}`,
-            missingFields,
           });
         }
 
-        // Validate image URL format if provided
-        if (user.image && !isValidUrl(user.image)) {
+        // Check if user already exists
+        const existingUser = await usersCollection.findOne({
+          email: user.email,
+        });
+        if (existingUser) {
           return res.status(400).json({
             success: false,
-            message: 'Invalid image URL format',
+            message: 'User already exists',
           });
         }
 
-        // Rest of your existing validation...
-
-        // Create user document (remove password)
-        const userDoc = {
-          name: user.name,
-          email: user.email,
-          image: user.image,
-          role: user.role,
-          bankAccountNo: user.bankAccountNo,
-          designation: user.designation,
+        // Insert new user
+        const result = await usersCollection.insertOne({
+          ...user,
           salary: parseFloat(user.salary),
           isVerified: false,
           isFired: false,
           createdAt: new Date(),
           updatedAt: new Date(),
-        };
+        });
 
-        // ... rest of your code
+        res.status(201).json({
+          success: true,
+          message: 'User created successfully',
+          insertedId: result.insertedId,
+        });
       } catch (error) {
-        // ... error handling
+        console.error('Error creating user:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Internal server error',
+        });
       }
     });
-
     // Helper function for URL validation
     function isValidUrl(string) {
       try {
@@ -136,41 +192,32 @@ async function run() {
       }
       next();
     };
-    // Get user role endpoint
-    app.get('/user/role/:email', verifyToken, async (req, res) => {
-      const email = req.params.email;
-
-      if (email !== req.decoded.email) {
-        return res.status(403).send({ message: 'Forbidden access' });
-      }
-
-      const user = await usersCollection.findOne(
-        { email },
-        { projection: { role: 1 } }
-      );
-
-      if (!user) {
-        return res.status(404).send({ message: 'User not found' });
-      }
-
-      res.send({ role: user.role });
-    });
-
-    // Check if user is admin (for specific admin-only operations)
     app.get('/user/admin/:email', verifyToken, async (req, res) => {
+      const { email } = req.params;
+
+      if (email !== req.decoded.email) {
+        return res.status(403).send({ message: 'forbidden access' });
+      }
+
+      const user = await usersCollection.findOne({ email });
+      const isAdmin = user?.role === 'admin'; // Consistent with your DB structure
+
+      res.send({ admin: isAdmin });
+    });
+
+    app.get('/user/hr/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
 
       if (email !== req.decoded.email) {
-        return res.status(403).send({ message: 'Forbidden access' });
+        return res.status(403).send({ message: 'forbidden access' });
       }
 
-      const user = await usersCollection.findOne(
-        { email },
-        { projection: { role: 1 } }
-      );
+      const user = await usersCollection.findOne({ email });
+      const isHR = user?.role === 'HR'; // Case-sensitive match
 
-      res.send({ admin: user?.role === 'Admin' });
+      res.send({ hr: isHR });
     });
+
     // Admin only apis
     app.get(
       '/all-employee-list',
@@ -497,30 +544,7 @@ async function run() {
 
     // HR Routes
     // ✅ 1. Get All Employees (HR Only)
-    // Dummy database (Array)
-    let workRecords = [
-      {
-        id: 1,
-        name: 'John Doe',
-        email: 'john@example.com',
-        task: 'Completed report',
-        date: '2024-03-01',
-      },
-      {
-        id: 2,
-        name: 'Jane Smith',
-        email: 'jane@example.com',
-        task: 'Fixed bugs',
-        date: '2024-03-10',
-      },
-      {
-        id: 3,
-        name: 'Michael Johnson',
-        email: 'michael@example.com',
-        task: 'Updated database',
-        date: '2024-02-15',
-      },
-    ];
+
     app.get('/employee-list', verifyToken, async (req, res) => {
       try {
         const employees = await usersCollection
@@ -584,47 +608,6 @@ async function run() {
       }
     });
 
-    // // Get Employee Salary History
-    // app.get('/employee-salary/:id', verifyToken, async (req, res) => {
-    //   try {
-    //     const employeeId = req.params.id;
-
-    //     // Validate ID format
-    //     if (!ObjectId.isValid(employeeId)) {
-    //       return res
-    //         .status(400)
-    //         .json({ message: 'Invalid employee ID format' });
-    //     }
-
-    //     const query = {
-    //       employeeId: new ObjectId(employeeId),
-    //       status: 'Paid', // Only show completed payments
-    //     };
-
-    //     // Fetch salary history sorted by year and month
-    //     const salaryHistory = await payrollCollection
-    //       .find(query)
-    //       .sort({ year: 1, month: 1 }) // Sort chronologically
-    //       .project({
-    //         month: 1,
-    //         year: 1,
-    //         salary: 1,
-    //         paymentDate: 1,
-    //         transactionId: 1,
-    //         _id: 0,
-    //       })
-    //       .toArray();
-
-    //     res.status(200).json(salaryHistory);
-    //   } catch (error) {
-    //     console.error('Error fetching salary history:', error);
-    //     res.status(500).json({
-    //       success: false,
-    //       message: 'Failed to fetch salary history',
-    //       error: process.env.NODE_ENV === 'development' ? error.message : null,
-    //     });
-    //   }
-    // });
     // Get Employee Details
     app.get('/employee-details/:id', verifyToken, async (req, res) => {
       try {
